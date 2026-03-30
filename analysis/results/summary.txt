@@ -1,0 +1,39 @@
+FineWeb measurement summary
+dataset_path=data\datasets\fineweb10B_sp1024\fineweb_val_000000.bin
+
+Entropy (nats / bits)
+H(1)=5.995145 / 8.649165
+H(2)=10.201814 / 14.718106
+DeltaH(1)=5.995145 / 8.649165
+DeltaH(2)=4.206669 / 6.068940
+
+Mutual information decay
+I(1)=1.788476
+I(10)=0.041161
+I(50)=0.021696
+I(100)=0.017618
+power_law_alpha=0.512871
+power_law_r2=0.786366
+exponential_decay_rate=0.006074
+exponential_r2=0.405637
+preferred_decay_model=power_law
+
+Zipf exponents
+alpha1=1.371429
+alpha2=1.978430
+
+Transfer matrix spectrum
+|lambda1|=1.000000
+|lambda2|=0.712612
+|lambda3|=0.581559
+spectral_gap=0.287388
+correlation_length_xi=2.951441
+
+Conclusion table
+measure | value | implication
+H(1) | 5.995145 nats | token frequencies are non-uniform, so unigram structure is worth preserving in embeddings or priors.
+DeltaH(2) | 4.206669 nats | adjacent-token dependence is substantial, so local-context modeling remains important.
+MI decay | power_law | decay shape indicates whether long-range structure is better modeled as scale-free or short-memory.
+Zipf alpha1 | 1.371429 | vocabulary usage is heavy-tailed, so capacity allocation should favor a small set of frequent tokens.
+Zipf alpha2 | 1.978430 | bigram usage is also heavy-tailed, supporting sparse or low-rank transition structure.
+Transfer spectrum | gap=0.287388, xi=2.951441 | the dominant transition modes quantify effective mixing speed and usable context length.
