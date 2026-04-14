@@ -95,7 +95,7 @@ class Hyperparameters:
 
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
+    matrix_lr = float(os.environ.get("MATRIX_LR", 0.015))
     ssm_lr = float(os.environ.get("SSM_LR", 0.001))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
@@ -917,21 +917,10 @@ def main() -> None:
         for name, p in base_model.named_parameters()
         if name not in {"tok_emb.weight", "bigram.embedding.weight"} and name not in head_param_names
     ]
-    # Muon (Newton-Schulz orthogonalization) only for attention 2D weights.
-    # SSM 2D weights use Adam — Muon's orthogonal updates destabilize recurrent gates.
     matrix_params = [
         p
         for name, p in body_named_params
-        if p.ndim >= 2
-        and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
-        and "ssm_blocks" not in name
-    ]
-    ssm_matrix_params = [
-        p
-        for name, p in body_named_params
-        if p.ndim >= 2
-        and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
-        and "ssm_blocks" in name
+        if p.ndim >= 2 and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
     scalar_params = [
         p
@@ -960,19 +949,13 @@ def main() -> None:
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
-    optimizer_ssm = torch.optim.Adam(
-        [{"params": ssm_matrix_params, "lr": args.ssm_lr, "base_lr": args.ssm_lr}],
-        betas=(args.beta1, args.beta2),
-        eps=args.adam_eps,
-        fused=True,
-    )
     optimizer_scalar = torch.optim.Adam(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
         fused=True,
     )
-    optimizers: list[torch.optim.Optimizer] = [optimizer_embed, optimizer_head, optimizer_muon, optimizer_ssm, optimizer_scalar]
+    optimizers: list[torch.optim.Optimizer] = [optimizer_embed, optimizer_head, optimizer_muon, optimizer_scalar]
 
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
