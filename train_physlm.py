@@ -95,8 +95,8 @@ class Hyperparameters:
 
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.04))
-    scalar_lr = float(os.environ.get("SCALAR_LR", 0.04))
+    matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
+    scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
@@ -104,7 +104,7 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
-    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
+    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.1))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
     ema_enabled = bool(int(os.environ.get("EMA_ENABLED", "1")))
     ema_decay = float(os.environ.get("EMA_DECAY", 0.997))
@@ -377,10 +377,10 @@ class HamiltonianSSM(nn.Module):
         x_fp32 = x.float()
         gate = torch.sigmoid(self.input_gate(x_fp32))
         u = gate * x_fp32
-        dt = F.softplus(self.dt_proj(u)) + 1e-3
+        dt = F.softplus(self.dt_proj(u)).clamp(max=5.0) + 1e-3
         drive = torch.tanh(self.b_proj(u)) / math.sqrt(self.state_dim)
         omega = self.omega.float().abs()[None, None, :]
-        phase = dt * omega
+        phase = (dt * omega).clamp(max=50.0)
         stacked_states, _ = self.chunked_scan(phase, drive)
         y = self.c_proj(stacked_states)
         y = torch.sigmoid(self.output_gate(x_fp32)) * y
