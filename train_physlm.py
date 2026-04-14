@@ -96,6 +96,7 @@ class Hyperparameters:
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
     matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
+    ssm_lr = float(os.environ.get("SSM_LR", 0.001))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
@@ -960,7 +961,7 @@ def main() -> None:
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
     optimizer_ssm = torch.optim.Adam(
-        [{"params": ssm_matrix_params, "lr": args.matrix_lr, "base_lr": args.matrix_lr}],
+        [{"params": ssm_matrix_params, "lr": args.ssm_lr, "base_lr": args.ssm_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
         fused=True,
@@ -984,7 +985,7 @@ def main() -> None:
     )
     log0(
         f"tie_embeddings:{args.tie_embeddings} embed_lr:{args.embed_lr} head_lr:{args.head_lr} "
-        f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
+        f"matrix_lr:{args.matrix_lr} ssm_lr:{args.ssm_lr} scalar_lr:{args.scalar_lr}"
     )
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
