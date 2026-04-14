@@ -284,24 +284,27 @@ class LeakySquaredMLP(nn.Module):
         return self.down(x.square())
 
 
+@torch.jit.script
 def _sequential_hamiltonian_scan(phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
     """Dissipative Hamiltonian scan: h_t = decay * exp(-i*phase) * h_{t-1} + drive_t"""
-    batch, seqlen, state_dim = phase.shape
+    batch = phase.size(0)
+    seqlen = phase.size(1)
+    state_dim = phase.size(2)
+    out_real = torch.empty_like(phase)
+    out_imag = torch.empty_like(phase)
     state_real = torch.zeros(batch, state_dim, device=phase.device, dtype=phase.dtype)
-    state_imag = torch.zeros_like(state_real)
-    outputs_real: list[Tensor] = []
-    outputs_imag: list[Tensor] = []
+    state_imag = torch.zeros(batch, state_dim, device=phase.device, dtype=phase.dtype)
     for t in range(seqlen):
         d = decay[:, t, :]
         ar = d * torch.cos(phase[:, t, :])
-        ai = -d * torch.sin(phase[:, t, :])
-        prev_real = state_real
-        prev_imag = state_imag
-        state_real = ar * prev_real - ai * prev_imag + drive[:, t, :]
-        state_imag = ai * prev_real + ar * prev_imag
-        outputs_real.append(state_real)
-        outputs_imag.append(state_imag)
-    return torch.stack(outputs_real, dim=1), torch.stack(outputs_imag, dim=1)
+        ai = d * torch.sin(phase[:, t, :])
+        new_real = ar * state_real + ai * state_imag + drive[:, t, :]
+        new_imag = -ai * state_real + ar * state_imag
+        state_real = new_real
+        state_imag = new_imag
+        out_real[:, t, :] = state_real
+        out_imag[:, t, :] = state_imag
+    return out_real, out_imag
 
 
 def _chunked_hamiltonian_scan_impl(phase: Tensor, drive: Tensor, decay: Tensor, chunk_size: int) -> tuple[Tensor, Tensor]:
@@ -380,9 +383,7 @@ class HamiltonianSSM(nn.Module):
         self.log_gamma = nn.Parameter(torch.full((state_dim,), -3.0, dtype=torch.float32))
         nn.init.zeros_(self.input_gate.bias)
         nn.init.constant_(self.output_gate.bias, -1.0)
-        self._scan_fn = _sequential_hamiltonian_scan
-        if sys.platform != "win32":
-            self._scan_fn = torch.compile(_sequential_hamiltonian_scan, dynamic=False, fullgraph=False)
+        # _sequential_hamiltonian_scan is @torch.jit.script — no compile wrapper needed
 
     def forward(self, x: Tensor) -> Tensor:
         x_fp32 = x.float()
@@ -394,7 +395,7 @@ class HamiltonianSSM(nn.Module):
         phase = (dt * omega).clamp(max=50.0)
         gamma = F.softplus(self.log_gamma.float())[None, None, :]
         decay = torch.exp(-gamma * dt).clamp(min=0.5, max=0.9999)
-        stacked_states, _ = self._scan_fn(phase, drive, decay)
+        stacked_states, _ = _sequential_hamiltonian_scan(phase, drive, decay)
         y = self.c_proj(stacked_states)
         y = torch.sigmoid(self.output_gate(x_fp32)) * y
         direct = self.direct_scale[None, None, :] * gate * x_fp32
