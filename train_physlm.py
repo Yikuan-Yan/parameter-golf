@@ -401,7 +401,7 @@ class HamiltonianSSM(nn.Module):
         # Dissipative decay: exp(-gamma * dt), ensuring |A| < 1
         gamma = F.softplus(self.log_gamma.float())[None, None, :]
         decay = torch.exp(-gamma * dt).clamp(min=0.5, max=0.9999)
-        stacked_states, _ = self.chunked_scan(phase, drive, decay)
+        stacked_states, _ = self.sequential_scan(phase, drive, decay)
         y = self.c_proj(stacked_states)
         y = torch.sigmoid(self.output_gate(x_fp32)) * y
         direct = self.direct_scale[None, None, :] * gate * x_fp32
