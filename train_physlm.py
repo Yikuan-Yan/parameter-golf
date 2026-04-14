@@ -95,7 +95,7 @@ class Hyperparameters:
 
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.015))
+    matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
     ssm_lr = float(os.environ.get("SSM_LR", 0.001))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
@@ -284,15 +284,17 @@ class LeakySquaredMLP(nn.Module):
         return self.down(x.square())
 
 
-def _sequential_hamiltonian_scan(phase: Tensor, drive: Tensor) -> tuple[Tensor, Tensor]:
+def _sequential_hamiltonian_scan(phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
+    """Dissipative Hamiltonian scan: h_t = decay * exp(-i*phase) * h_{t-1} + drive_t"""
     batch, seqlen, state_dim = phase.shape
     state_real = torch.zeros(batch, state_dim, device=phase.device, dtype=phase.dtype)
     state_imag = torch.zeros_like(state_real)
     outputs_real: list[Tensor] = []
     outputs_imag: list[Tensor] = []
     for t in range(seqlen):
-        ar = torch.cos(phase[:, t, :])
-        ai = -torch.sin(phase[:, t, :])
+        d = decay[:, t, :]
+        ar = d * torch.cos(phase[:, t, :])
+        ai = -d * torch.sin(phase[:, t, :])
         prev_real = state_real
         prev_imag = state_imag
         state_real = ar * prev_real - ai * prev_imag + drive[:, t, :]
@@ -302,16 +304,19 @@ def _sequential_hamiltonian_scan(phase: Tensor, drive: Tensor) -> tuple[Tensor, 
     return torch.stack(outputs_real, dim=1), torch.stack(outputs_imag, dim=1)
 
 
-def _chunked_hamiltonian_scan_impl(phase: Tensor, drive: Tensor, chunk_size: int) -> tuple[Tensor, Tensor]:
+def _chunked_hamiltonian_scan_impl(phase: Tensor, drive: Tensor, decay: Tensor, chunk_size: int) -> tuple[Tensor, Tensor]:
+    """Dissipative chunked scan: A_t = decay_t * exp(-i*phase_t), with |A_t| < 1."""
     batch, seqlen, state_dim = phase.shape
     pad_tokens = (-seqlen) % chunk_size
     if pad_tokens > 0:
         phase = F.pad(phase, (0, 0, 0, pad_tokens))
         drive = F.pad(drive, (0, 0, 0, pad_tokens))
+        decay = F.pad(decay, (0, 0, 0, pad_tokens), value=1.0)
     padded_len = phase.size(1)
     num_chunks = padded_len // chunk_size
     phase_chunks = phase.reshape(batch, num_chunks, chunk_size, state_dim)
     drive_chunks = drive.reshape(batch, num_chunks, chunk_size, state_dim)
+    decay_chunks = decay.reshape(batch, num_chunks, chunk_size, state_dim)
 
     state_real = torch.zeros(batch, state_dim, device=phase.device, dtype=phase.dtype)
     state_imag = torch.zeros_like(state_real)
@@ -321,20 +326,28 @@ def _chunked_hamiltonian_scan_impl(phase: Tensor, drive: Tensor, chunk_size: int
     for chunk_idx in range(num_chunks):
         chunk_phase = phase_chunks[:, chunk_idx]
         chunk_drive = drive_chunks[:, chunk_idx]
+        chunk_decay = decay_chunks[:, chunk_idx]
 
-        # Because the per-step transition is unitary, log-space reduces to an angle scan:
-        # cumulative log(A_t) -> cumulative phase -> exp(i * cumulative phase).
+        # Log-space cumulative product for dissipative evolution:
+        # log|A_t| = log(decay_t), angle(A_t) = -phase_t
+        log_decay_prefix = torch.cumsum(torch.log(chunk_decay + 1e-8), dim=1)
+        prefix_mag = torch.exp(log_decay_prefix)
         prefix_phase = torch.cumsum(chunk_phase, dim=1)
-        prefix_real = torch.cos(prefix_phase)
-        prefix_imag = -torch.sin(prefix_phase)
-        inv_prefix_real = prefix_real
-        inv_prefix_imag = -prefix_imag
+        prefix_real = prefix_mag * torch.cos(prefix_phase)
+        prefix_imag = -prefix_mag * torch.sin(prefix_phase)
+
+        # Inverse of prefix for transforming drive into "unwound" space
+        inv_mag = torch.exp(-log_decay_prefix)
+        inv_prefix_real = inv_mag * torch.cos(prefix_phase)
+        inv_prefix_imag = inv_mag * torch.sin(prefix_phase)
 
         transformed_real = chunk_drive * inv_prefix_real
         transformed_imag = chunk_drive * inv_prefix_imag
         accum_real = torch.cumsum(transformed_real, dim=1)
         accum_imag = torch.cumsum(transformed_imag, dim=1)
 
+        # Carry boundary state scaled by chunk's total decay
+        total_decay = prefix_mag[:, -1:, :]
         carry_real = state_real[:, None, :] + accum_real
         carry_imag = state_imag[:, None, :] + accum_imag
         chunk_out_real = prefix_real * carry_real - prefix_imag * carry_imag
@@ -342,8 +355,9 @@ def _chunked_hamiltonian_scan_impl(phase: Tensor, drive: Tensor, chunk_size: int
 
         out_real[:, chunk_idx] = chunk_out_real
         out_imag[:, chunk_idx] = chunk_out_imag
-        state_real = chunk_out_real[:, -1, :]
-        state_imag = chunk_out_imag[:, -1, :]
+        # Boundary state for next chunk is in the "unwound" coordinate of last step
+        state_real = carry_real[:, -1, :]
+        state_imag = carry_imag[:, -1, :]
 
     out_real = out_real.reshape(batch, padded_len, state_dim)[:, :seqlen, :]
     out_imag = out_imag.reshape(batch, padded_len, state_dim)[:, :seqlen, :]
@@ -362,17 +376,19 @@ class HamiltonianSSM(nn.Module):
         self.output_gate = CastedLinear(dim, dim, bias=True)
         self.direct_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.omega = nn.Parameter(torch.logspace(-2.0, 0.3, state_dim, dtype=torch.float16))
+        # Learnable damping rate (Lindbladian dissipation): initialized so decay ≈ 0.95/step
+        self.log_gamma = nn.Parameter(torch.full((state_dim,), -3.0, dtype=torch.float32))
         nn.init.zeros_(self.input_gate.bias)
         nn.init.constant_(self.output_gate.bias, -1.0)
-        self._scan_impl = lambda phase, drive: _chunked_hamiltonian_scan_impl(phase, drive, self.chunk_size)
+        self._scan_impl = lambda phase, drive, decay: _chunked_hamiltonian_scan_impl(phase, drive, decay, self.chunk_size)
         if sys.platform != "win32":
             self._scan_impl = torch.compile(self._scan_impl, dynamic=False, fullgraph=False)
 
-    def sequential_scan(self, phase: Tensor, drive: Tensor) -> tuple[Tensor, Tensor]:
-        return _sequential_hamiltonian_scan(phase, drive)
+    def sequential_scan(self, phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
+        return _sequential_hamiltonian_scan(phase, drive, decay)
 
-    def chunked_scan(self, phase: Tensor, drive: Tensor) -> tuple[Tensor, Tensor]:
-        return self._scan_impl(phase, drive)
+    def chunked_scan(self, phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
+        return self._scan_impl(phase, drive, decay)
 
     def forward(self, x: Tensor) -> Tensor:
         x_fp32 = x.float()
@@ -382,7 +398,10 @@ class HamiltonianSSM(nn.Module):
         drive = torch.tanh(self.b_proj(u)) / math.sqrt(self.state_dim)
         omega = self.omega.float().abs()[None, None, :]
         phase = (dt * omega).clamp(max=50.0)
-        stacked_states, _ = self.chunked_scan(phase, drive)
+        # Dissipative decay: exp(-gamma * dt), ensuring |A| < 1
+        gamma = F.softplus(self.log_gamma.float())[None, None, :]
+        decay = torch.exp(-gamma * dt).clamp(min=0.5, max=0.9999)
+        stacked_states, _ = self.chunked_scan(phase, drive, decay)
         y = self.c_proj(stacked_states)
         y = torch.sigmoid(self.output_gate(x_fp32)) * y
         direct = self.direct_scale[None, None, :] * gate * x_fp32
