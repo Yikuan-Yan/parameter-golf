@@ -93,7 +93,7 @@ class Hyperparameters:
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     zipf_alpha = float(os.environ.get("ZIPF_ALPHA", 1.37))
 
-    embed_lr = float(os.environ.get("EMBED_LR", 0.6))
+    embed_lr = float(os.environ.get("EMBED_LR", 0.035))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
     matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
     ssm_lr = float(os.environ.get("SSM_LR", 0.001))
@@ -105,7 +105,7 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
-    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.1))
+    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
     ema_enabled = bool(int(os.environ.get("EMA_ENABLED", "1")))
     ema_decay = float(os.environ.get("EMA_DECAY", 0.997))
@@ -374,7 +374,7 @@ class HamiltonianSSM(nn.Module):
         self.b_proj = CastedLinear(dim, state_dim, bias=False)
         self.c_proj = CastedLinear(state_dim, dim, bias=False)
         self.output_gate = CastedLinear(dim, dim, bias=True)
-        self.direct_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.direct_scale = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
         self.omega = nn.Parameter(torch.logspace(-2.0, 0.3, state_dim, dtype=torch.float16))
         # Learnable damping rate (Lindbladian dissipation): initialized so decay ≈ 0.95/step
         self.log_gamma = nn.Parameter(torch.full((state_dim,), -3.0, dtype=torch.float32))
@@ -472,7 +472,6 @@ class BoltzmannOutput(nn.Module):
         self.logit_softcap = logit_softcap
         ranks = torch.arange(1, vocab_size + 1, dtype=torch.float32)
         self.self_energy = nn.Parameter(-zipf_alpha * torch.log(ranks))
-        self.temperature = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
         self.proj = None if tie_embeddings else CastedLinear(dim, vocab_size, bias=False, quant_bits=6)
 
     def forward(self, x: Tensor, tied_weight: Tensor | None) -> Tensor:
@@ -482,8 +481,7 @@ class BoltzmannOutput(nn.Module):
             logits = F.linear(x, tied_weight.to(dtype=x.dtype))
         else:
             logits = self.proj(x)
-        temp = self.temperature.abs().clamp_min(0.05).to(dtype=x.dtype)
-        logits = (logits + self.self_energy.to(dtype=x.dtype)) / temp
+        logits = logits + self.self_energy.to(dtype=x.dtype)
         if self.logit_softcap > 0:
             logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
         return logits
