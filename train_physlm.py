@@ -380,15 +380,9 @@ class HamiltonianSSM(nn.Module):
         self.log_gamma = nn.Parameter(torch.full((state_dim,), -3.0, dtype=torch.float32))
         nn.init.zeros_(self.input_gate.bias)
         nn.init.constant_(self.output_gate.bias, -1.0)
-        self._scan_impl = lambda phase, drive, decay: _chunked_hamiltonian_scan_impl(phase, drive, decay, self.chunk_size)
+        self._scan_fn = _sequential_hamiltonian_scan
         if sys.platform != "win32":
-            self._scan_impl = torch.compile(self._scan_impl, dynamic=False, fullgraph=False)
-
-    def sequential_scan(self, phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
-        return _sequential_hamiltonian_scan(phase, drive, decay)
-
-    def chunked_scan(self, phase: Tensor, drive: Tensor, decay: Tensor) -> tuple[Tensor, Tensor]:
-        return self._scan_impl(phase, drive, decay)
+            self._scan_fn = torch.compile(_sequential_hamiltonian_scan, dynamic=False, fullgraph=False)
 
     def forward(self, x: Tensor) -> Tensor:
         x_fp32 = x.float()
@@ -398,10 +392,9 @@ class HamiltonianSSM(nn.Module):
         drive = torch.tanh(self.b_proj(u)) / math.sqrt(self.state_dim)
         omega = self.omega.float().abs()[None, None, :]
         phase = (dt * omega).clamp(max=50.0)
-        # Dissipative decay: exp(-gamma * dt), ensuring |A| < 1
         gamma = F.softplus(self.log_gamma.float())[None, None, :]
         decay = torch.exp(-gamma * dt).clamp(min=0.5, max=0.9999)
-        stacked_states, _ = self.sequential_scan(phase, drive, decay)
+        stacked_states, _ = self._scan_fn(phase, drive, decay)
         y = self.c_proj(stacked_states)
         y = torch.sigmoid(self.output_gate(x_fp32)) * y
         direct = self.direct_scale[None, None, :] * gate * x_fp32
